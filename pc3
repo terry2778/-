@@ -1,1 +1,543 @@
+from DrissionPage import ChromiumPage
+import pandas as pd
+import time
+import re
+from pathlib import Path
+from datetime import datetime
 
+# ====== 配置部分 ======
+desktop_path = Path.home() / "Desktop"
+data_dir = desktop_path / "淘宝评论_最终版"
+data_dir.mkdir(exist_ok=True)
+excel_path = data_dir / '淘宝评论.xlsx'
+
+# 目标URL
+target_url = 'https://item.taobao.com/item.htm?ali_refid=a3_430620_1006%3A1151396433%3AH%3A4smcY6WxR0VtwqsXOujoRmM4W5Ixekm1%3Ab47c5780755441108402a3b445e7a5f0&ali_trackid=282_b47c5780755441108402a3b445e7a5f0&id=903871222461&mi_id=0000WhnzLg5VFiKC76N6Qrby9xRZ_UbZNBYSoiOJafjsohU&mm_sceneid=1_0_127917134_0&skuId=5764101097163&spm=a21n57.1.hoverItem.1&utparam=%7B%22aplus_abtest%22%3A%22d3ee1c0dbddfffc521358d9cb40dc355%22%7D&xxc=ad_ztc'
+
+print("=" * 80)
+print("淘宝评论爬虫 - 简洁版")
+print("=" * 80)
+print(f"目标URL: {target_url[:80]}...")
+print(f"数据保存到: {excel_path}")
+print("=" * 80)
+
+class TaobaoCommentCrawler:
+    """淘宝评论爬虫类"""
+    
+    def __init__(self):
+        self.browser = ChromiumPage()
+        self.comments_data = []
+        self.setup_browser()
+    
+    def setup_browser(self):
+        """设置浏览器"""
+        self.browser.set.user_agent(
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        )
+        
+        try:
+            self.browser.set.window_size(1400, 900)
+        except:
+            pass
+    
+    def find_and_click_element(self, element_type, identifier, description):
+        """查找并点击元素"""
+        print(f"查找{description}...")
+        
+        strategies = [
+            lambda: self.browser.ele(f'xpath:{identifier}', timeout=5),
+            lambda: self.browser.ele(f'css:{identifier}', timeout=5),
+            lambda: self.browser.ele(f'text()={identifier}', timeout=5) if element_type == 'text' else None,
+            lambda: self.browser.ele(f'@{identifier}', timeout=5) if element_type == 'attr' else None,
+        ]
+        
+        for strategy in strategies:
+            try:
+                element = strategy()
+                if element:
+                    print(f"  找到{description}: {identifier}")
+                    element.click()
+                    time.sleep(3)
+                    return True
+            except:
+                continue
+        
+        print(f"  未找到{description}")
+        return False
+    
+    def navigate_to_comments(self):
+        """导航到评论页面"""
+        print("\n1. 导航到评论页面")
+        
+        print(f"访问页面...")
+        self.browser.get(target_url)
+        time.sleep(8)
+        
+        navigation_strategies = [
+            ('xpath', '//*[contains(text(), "评价")]', '"评价"标签'),
+            ('xpath', '//*[contains(text(), "用户评价")]', '"用户评价"标签'),
+            ('xpath', '//*[contains(text(), "宝贝评价")]', '"宝贝评价"标签'),
+            ('xpath', '//*[contains(text(), "评论")]', '"评论"标签'),
+            ('xpath', '//*[contains(text(), "查看全部评价")]', '"查看全部评价"按钮'),
+            ('css', '.tb-tab-anchor[data-spm="user-evaluation"]', '评价CSS选择器'),
+        ]
+        
+        for strategy_type, identifier, description in navigation_strategies:
+            if self.find_and_click_element(strategy_type, identifier, description):
+                print(f"  成功进入评论页面")
+                time.sleep(5)
+                return True
+        
+        print("  未能进入评论页面，尝试在当前页面查找评论")
+        return False
+    
+    def load_all_comments(self):
+        """加载全部评论"""
+        print("\n2. 加载全部评论")
+        
+        initial_count = self.count_comments()
+        print(f"  初始评论数: {initial_count}")
+        
+        load_attempts = 0
+        max_attempts = 20
+        no_new_comments_count = 0
+        
+        while load_attempts < max_attempts:
+            load_attempts += 1
+            
+            print(f"  尝试 {load_attempts}: 滚动加载")
+            self.scroll_for_comments()
+            
+            if load_attempts % 3 == 0:
+                self.click_load_more_buttons()
+            
+            current_count = self.count_comments()
+            if current_count > initial_count:
+                print(f"    发现新评论: {current_count - initial_count} 条")
+                initial_count = current_count
+                no_new_comments_count = 0
+            else:
+                no_new_comments_count += 1
+                print(f"    未发现新评论 (连续 {no_new_comments_count} 次)")
+            
+            if no_new_comments_count >= 5:
+                print("    连续多次未发现新评论，停止加载")
+                break
+            
+            time.sleep(2)
+        
+        print(f"  最终评论数: {initial_count}")
+    
+    def count_comments(self):
+        """统计评论数量"""
+        selectors = [
+            'xpath://div[contains(@class, "Comment-")]',
+            'xpath://div[contains(@class, "comment-")]',
+            'xpath://div[contains(@class, "rate-")]',
+            'xpath://div[contains(@class, "tb-rev-item")]',
+        ]
+        
+        for selector in selectors:
+            try:
+                elements = self.browser.eles(selector)
+                if elements:
+                    return len(elements)
+            except:
+                continue
+        
+        return 0
+    
+    def scroll_for_comments(self):
+        """滚动以加载评论"""
+        scroll_strategies = [
+            (500, "评论区域"),
+            (800, "页面中部"),
+            (1200, "页面底部"),
+            (300, "小幅滚动"),
+            (1000, "大幅滚动"),
+        ]
+        
+        for scroll_amount, description in scroll_strategies:
+            print(f"    滚动{description}: {scroll_amount}px")
+            self.browser.scroll.down(scroll_amount)
+            time.sleep(1.5)
+    
+    def click_load_more_buttons(self):
+        """点击加载更多按钮"""
+        button_selectors = [
+            'xpath://*[contains(text(), "加载更多")]',
+            'xpath://*[contains(text(), "查看更多")]',
+            'xpath://*[contains(text(), "查看全部")]',
+            'xpath://button[contains(@class, "load-more")]',
+            'xpath://a[contains(@class, "more")]',
+        ]
+        
+        for selector in button_selectors:
+            try:
+                buttons = self.browser.eles(selector)
+                if buttons:
+                    print(f"    找到并点击加载按钮")
+                    buttons[0].click()
+                    time.sleep(3)
+                    return True
+            except:
+                continue
+        
+        return False
+    
+    def extract_comments_by_position(self):
+        """通过元素位置提取评论"""
+        print("\n3. 提取评论")
+        
+        comment_containers = self.locate_comment_containers()
+        
+        if not comment_containers:
+            print("  未找到评论容器")
+            return []
+        
+        print(f"  找到 {len(comment_containers)} 个评论容器")
+        
+        all_comments = []
+        
+        for i, container in enumerate(comment_containers[:100]):
+            try:
+                comment_data = self.extract_single_comment(container, i+1)
+                if comment_data and comment_data.get('评论内容'):
+                    all_comments.append(comment_data)
+                    print(f"  提取评论 {len(all_comments)}: {comment_data['用户名'][:10]}...")
+            except Exception as e:
+                continue
+        
+        return all_comments
+    
+    def locate_comment_containers(self):
+        """定位评论容器"""
+        location_strategies = [
+            lambda: self.browser.eles('xpath://div[contains(@class, "Comment-")]'),
+            lambda: self.browser.eles('css:div[class*="Comment-"]'),
+            lambda: self.find_elements_near_text('评价', 'div'),
+            lambda: self.browser.eles('css:.tb-rev-item'),
+            lambda: self.browser.eles('xpath://div[contains(@class, "rate-card") or contains(@class, "comment-item")]'),
+        ]
+        
+        for strategy in location_strategies:
+            try:
+                elements = strategy()
+                if elements and len(elements) > 0:
+                    print(f"  使用策略找到 {len(elements)} 个元素")
+                    return elements
+            except:
+                continue
+        
+        return []
+    
+    def find_elements_near_text(self, text, tag_name='div'):
+        """查找文本附近的元素"""
+        try:
+            text_elements = self.browser.eles(f'xpath://*[contains(text(), "{text}")]')
+            
+            nearby_elements = []
+            for text_element in text_elements:
+                parent = text_element.parent
+                for _ in range(3):
+                    if parent:
+                        siblings = parent.eles(f'xpath:.//{tag_name}')
+                        nearby_elements.extend(siblings)
+                        parent = parent.parent
+            
+            return nearby_elements
+        except:
+            return []
+    
+    def extract_single_comment(self, container, index):
+        """提取单个评论"""
+        comment_data = {
+            '序号': index,
+            '用户名': '匿名用户',
+            '评论内容': '',
+            '评论时间': '',
+            '购买信息': ''
+        }
+        
+        try:
+            # 提取用户名
+            comment_data['用户名'] = self.extract_username_from_container(container)
+            
+            # 提取评论内容
+            comment_data['评论内容'] = self.extract_comment_content(container)
+            
+            # 提取评论时间
+            comment_data['评论时间'] = self.extract_comment_time(container)
+            
+            # 提取购买信息
+            comment_data['购买信息'] = self.extract_purchase_info(container)
+            
+            return comment_data
+            
+        except Exception as e:
+            return None
+    
+    def extract_username_from_container(self, container):
+        """从容器提取用户名"""
+        strategies = [
+            lambda: self.find_in_container(container, 'css:.header-nYbpA78v span'),
+            lambda: self.find_in_container(container, 'css:[class*="user"]'),
+            lambda: self.find_in_container(container, 'css:[class*="name"]'),
+            lambda: self.find_first_short_text(container),
+        ]
+        
+        for strategy in strategies:
+            try:
+                username = strategy()
+                if username and username != '匿名用户':
+                    return username[:30]
+            except:
+                continue
+        
+        return '匿名用户'
+    
+    def find_in_container(self, container, selector):
+        """在容器内查找元素"""
+        try:
+            element = container.ele(selector)
+            if element:
+                text = element.text.strip() if hasattr(element, 'text') and element.text else ""
+                if text and 2 <= len(text) <= 20:
+                    return text
+        except:
+            pass
+        return None
+    
+    def find_first_short_text(self, container):
+        """查找第一个短文本"""
+        try:
+            all_text = container.text if hasattr(container, 'text') else ""
+            lines = all_text.split('\n')
+            
+            for line in lines:
+                line = line.strip()
+                if 2 <= len(line) <= 15 and not re.search(r'[\d-]{8,}', line):
+                    return line
+        except:
+            pass
+        
+        return None
+    
+    def extract_comment_content(self, container):
+        """提取评论内容"""
+        strategies = [
+            lambda: self.find_content_by_class(container, 'content-uono'),
+            lambda: self.find_content_by_class(container, 'contentWrapper'),
+            lambda: self.find_long_text_in_container(container),
+        ]
+        
+        for strategy in strategies:
+            try:
+                content = strategy()
+                if content and len(content) > 10:
+                    return content[:500]
+            except:
+                continue
+        
+        return ''
+    
+    def find_content_by_class(self, container, class_part):
+        """通过类名查找内容"""
+        try:
+            elements = container.eles(f'css:[class*="{class_part}"]')
+            for element in elements:
+                title = element.attr('title')
+                if title and len(title) > 10:
+                    return title
+                
+                text = element.text.strip() if hasattr(element, 'text') and element.text else ""
+                if text and len(text) > 10:
+                    return text
+        except:
+            pass
+        
+        return ''
+    
+    def find_long_text_in_container(self, container):
+        """查找容器内的长文本"""
+        try:
+            all_text = container.text if hasattr(container, 'text') else ""
+            lines = [line.strip() for line in all_text.split('\n') if len(line.strip()) > 20]
+            
+            if lines:
+                return max(lines, key=len)
+        except:
+            pass
+        
+        return ''
+    
+    def extract_comment_time(self, container):
+        """提取评论时间"""
+        try:
+            container_text = container.text if hasattr(container, 'text') else ""
+            
+            patterns = [
+                r'(\d{4}-\d{1,2}-\d{1,2})',
+                r'(\d{1,2}月\d{1,2}日)',
+                r'(\d{1,2}-\d{1,2})',
+                r'(\d{1,2}/\d{1,2}/\d{4})',
+            ]
+            
+            for pattern in patterns:
+                match = re.search(pattern, container_text)
+                if match:
+                    return match.group(1)
+        except:
+            pass
+        
+        return ''
+    
+    def extract_purchase_info(self, container):
+        """提取购买信息"""
+        try:
+            container_text = container.text if hasattr(container, 'text') else ""
+            
+            patterns = [
+                r'已购[：:]\s*([^\n]+)',
+                r'购买[：:]\s*([^\n]+)',
+                r'规格[：:]\s*([^\n]+)',
+            ]
+            
+            for pattern in patterns:
+                match = re.search(pattern, container_text)
+                if match:
+                    return match.group(1).strip()
+        except:
+            pass
+        
+        return ''
+    
+    def save_to_excel(self, comments):
+        """保存到Excel"""
+        if not comments:
+            print("\n❌ 没有评论可保存")
+            return False
+        
+        try:
+            df = pd.DataFrame(comments)
+            
+            # 只保留需要的列：序号、用户名、评论时间、购买信息、评论内容
+            column_order = ['序号', '用户名', '评论时间', '购买信息', '评论内容']
+            df = df[column_order]
+            
+            # 保存到Excel
+            df.to_excel(excel_path, index=False, engine='openpyxl')
+            
+            print(f"\n✅ 成功保存 {len(df)} 条评论到: {excel_path}")
+            
+            # 显示数据预览
+            print("\n📋 数据预览:")
+            print("=" * 80)
+            for _, row in df.head(10).iterrows():
+                print(f"{row['序号']}. [{row['用户名']}]", end="")
+                if row['评论时间']:
+                    print(f" ({row['评论时间']})", end="")
+                print()
+                
+                if row['购买信息']:
+                    print(f"   购买: {row['购买信息'][:60]}...")
+                
+                print(f"   内容: {row['评论内容'][:80]}...")
+                print()
+            
+            # 保存为CSV
+            csv_path = excel_path.with_suffix('.csv')
+            df.to_csv(csv_path, index=False, encoding='utf-8-sig')
+            print(f"📄 同时保存为CSV: {csv_path}")
+            
+            return True
+            
+        except Exception as e:
+            print(f"保存数据时出错: {str(e)}")
+            return False
+    
+    def save_debug_info(self):
+        """保存调试信息"""
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            
+            screenshot_path = data_dir / f'screenshot_{timestamp}.png'
+            self.browser.get_screenshot(as_bytes=False, path=str(screenshot_path))
+            print(f"📸 页面截图已保存: {screenshot_path}")
+            
+            html_path = data_dir / f'page_structure_{timestamp}.html'
+            html_content = self.browser.html if hasattr(self.browser, 'html') else ""
+            
+            if html_content:
+                with open(html_path, 'w', encoding='utf-8') as f:
+                    f.write(html_content[:50000])
+                
+                print(f"📁 页面结构已保存: {html_path}")
+            
+        except Exception as e:
+            print(f"保存调试信息出错: {str(e)}")
+    
+    def run(self):
+        """运行爬虫"""
+        start_time = datetime.now()
+        print(f"开始时间: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        
+        try:
+            # 1. 导航到评论页面
+            self.navigate_to_comments()
+            
+            # 2. 加载全部评论
+            self.load_all_comments()
+            
+            # 3. 通过元素位置提取评论
+            comments = self.extract_comments_by_position()
+            
+            # 4. 保存结果
+            if comments:
+                self.save_to_excel(comments)
+                
+                print(f"\n🎉 爬取完成!")
+                print(f"总耗时: {(datetime.now() - start_time).seconds}秒")
+                print(f"有效评论数: {len(comments)}")
+                
+                # 显示统计信息
+                print("\n📊 统计信息:")
+                print(f"- 平均评论长度: {sum(len(c['评论内容']) for c in comments)/len(comments):.1f} 字符")
+                
+                # 用户名统计
+                usernames = [c['用户名'] for c in comments]
+                unique_users = len(set(usernames))
+                print(f"- 独立用户数: {unique_users}")
+            
+            else:
+                print("\n❌ 未能提取到任何评论")
+                self.save_debug_info()
+                
+                print("\n💡 建议:")
+                print("1. 检查是否需要登录淘宝账号")
+                print("2. 手动打开页面确认评论是否可见")
+                print("3. 查看保存的截图和页面结构分析")
+        
+        except Exception as e:
+            print(f"\n❌ 程序执行出错: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            
+            self.save_debug_info()
+        
+        finally:
+            try:
+                self.browser.close()
+                print("\n浏览器已关闭")
+            except:
+                pass
+        
+        print(f"\n结束时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print("=" * 80)
+
+# 主程序
+if __name__ == "__main__":
+    print("淘宝评论爬虫启动...")
+    
+    crawler = TaobaoCommentCrawler()
+    crawler.run()
